@@ -1,0 +1,7 @@
+gcloud projects list --format="value(projectId)" | while read project
+do
+  gcloud compute disks list \
+  --project="$project" \
+  --filter="-users:*" \
+  --format="csv[no-heading](project,name,zone,sizeGb)"
+done | sed '1i project,name,zone,sizeGb' > orphan_disks_all_projects.csv
