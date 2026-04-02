@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# ============================================================
+# GCP Stopped VMs Inventory Script
+# READ-ONLY: No changes made to any resources
+# Output: stopped_vms_<timestamp>.csv
+# ============================================================
+
+OUTPUT_FILE="stopped_vms_$(date +%Y%m%d_%H%M%S).csv"
+TEMP_FILE=$(mktemp)
+
+echo "Fetching all accessible GCP projects..."
+
+# Write CSV header
+echo "Project ID,VM Name,Zone,Machine Type,Status,Last Start Timestamp,Internal IP,External IP,Labels" > "$OUTPUT_FILE"
+
+# Get all projects accessible to the current account
+PROJECTS=$(gcloud projects list --format="value(projectId)" 2>/dev/null)
+
+if [[ -z "$PROJECTS" ]]; then
+  echo "ERROR: No projects found or insufficient permissions."
+  exit 1
+fi
+
+PROJECT_COUNT=$(echo "$PROJECTS" | wc -l | tr -d ' ')
+echo "Found $PROJECT_COUNT project(s). Scanning for stopped VMs..."
+echo ""
+
+TOTAL_VMS=0
+PROCESSED=0
+
+while IFS= read -r PROJECT; do
+  PROCESSED=$((PROCESSED + 1))
+  echo "[$PROCESSED/$PROJECT_COUNT] Scanning project: $PROJECT"
+
+  # Check if Compute Engine API is enabled for this project
+  API_CHECK=$(gcloud compute instances list \
+    --project="$PROJECT" \
+    --limit=1 \
+    --format="value(name)" 2>&1)
+
+  if echo "$API_CHECK" | grep -qiE "not enabled|billing|permission|403|disabled"; then
+    echo "  ⚠ Skipping: Compute API not enabled or insufficient permissions."
+    continue
+  fi
+
+  # Fetch all TERMINATED (stopped) VMs in this project
+  VMS=$(gcloud compute instances list \
+    --project="$PROJECT" \
+    --filter="status=TERMINATED" \
+    --format="csv[no-heading](name,zone.basename(),machineType.basename(),status,lastStartTimestamp,networkInterfaces[0].networkIP,networkInterfaces[0].accessConfigs[0].natIP,labels.list())" \
+    2>/dev/null)
+
+  if [[ -z "$VMS" ]]; then
+    echo "  ✓ No stopped VMs found."
+    continue
+  fi
+
+  VM_COUNT=$(echo "$VMS" | grep -c .)
+  echo "  ✓ Found $VM_COUNT stopped VM(s)."
+  TOTAL_VMS=$((TOTAL_VMS + VM_COUNT))
+
+  # Append each VM row with project ID prepended
+  while IFS= read -r LINE; do
+    echo "$PROJECT,$LINE" >> "$OUTPUT_FILE"
+  done <<< "$VMS"
+
+done <<< "$PROJECTS"
+
+echo ""
+echo "============================================"
+echo "Scan complete."
+echo "Total stopped VMs found : $TOTAL_VMS"
+echo "Output saved to         : $OUTPUT_FILE"
+echo "============================================"
+
+rm -f "$TEMP_FILE"
