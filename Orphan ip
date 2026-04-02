@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# ============================================================
+# list_unused_ips.sh
+# Lists all UNATTACHED (unused) static external/internal IPs
+# across all accessible GCP projects.
+# READ-ONLY: No changes are made to any resource.
+# ============================================================
+
+set -euo pipefail
+
+OUTPUT_FILE="unused_static_ips_$(date +%Y%m%d_%H%M%S).csv"
+
+echo "project_id,region,ip_name,ip_address,ip_version,address_type,network_tier,status,creation_timestamp" > "$OUTPUT_FILE"
+
+echo "=============================================="
+echo "  GCP Unused Static IP Audit (Read-Only)"
+echo "=============================================="
+echo "Output file: $OUTPUT_FILE"
+echo ""
+
+# Get all accessible projects
+PROJECTS=$(gcloud projects list --format="value(projectId)" 2>/dev/null)
+
+if [[ -z "$PROJECTS" ]]; then
+  echo "ERROR: No projects found or insufficient permissions."
+  exit 1
+fi
+
+TOTAL_UNUSED=0
+TOTAL_PROJECTS=0
+SKIPPED_PROJECTS=0
+
+while IFS= read -r PROJECT_ID; do
+  echo "Scanning project: $PROJECT_ID ..."
+
+  # Check if Compute Engine API is enabled
+  API_STATUS=$(gcloud services list \
+    --project="$PROJECT_ID" \
+    --filter="name:compute.googleapis.com" \
+    --format="value(state)" 2>/dev/null || echo "")
+
+  if [[ "$API_STATUS" != "ENABLED" ]]; then
+    echo "  [SKIP] Compute API not enabled in $PROJECT_ID"
+    ((SKIPPED_PROJECTS++)) || true
+    continue
+  fi
+
+  ((TOTAL_PROJECTS++)) || true
+
+  # List all static addresses where status=RESERVED (not in use / unattached)
+  # RESERVED = allocated but not attached to any resource
+  UNUSED=$(gcloud compute addresses list \
+    --project="$PROJECT_ID" \
+    --filter="status=RESERVED" \
+    --format="csv[no-heading](region.basename(),name,address,ipVersion,addressType,networkTier,status,creationTimestamp)" \
+    2>/dev/null || echo "")
+
+  if [[ -z "$UNUSED" ]]; then
+    echo "  No unused IPs found."
+    continue
+  fi
+
+  COUNT=0
+  while IFS= read -r LINE; do
+    [[ -z "$LINE" ]] && continue
+    echo "${PROJECT_ID},${LINE}" >> "$OUTPUT_FILE"
+    ((COUNT++)) || true
+    ((TOTAL_UNUSED++)) || true
+  done <<< "$UNUSED"
+
+  echo "  Found ${COUNT} unused IP(s)."
+
+done <<< "$PROJECTS"
+
+echo ""
+echo "=============================================="
+echo "  Audit Complete"
+echo "=============================================="
+echo "  Projects scanned : $TOTAL_PROJECTS"
+echo "  Projects skipped : $SKIPPED_PROJECTS (Compute API not enabled)"
+echo "  Total unused IPs : $TOTAL_UNUSED"
+echo "  Output saved to  : $OUTPUT_FILE"
+echo "=============================================="
